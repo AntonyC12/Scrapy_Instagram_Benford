@@ -1,0 +1,8 @@
+# ==================== requirements.txt ====================
+# Archivo: requirements.txt
+# Descripción: Dependencias del proyecto
+
+selenium
+webdriver-manager
+python-dotenv
+playwright
