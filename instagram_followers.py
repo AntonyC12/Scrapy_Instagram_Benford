@@ -511,6 +511,9 @@ async def get_follower_count_playwright(context, username, worker_id):
         if page:
             await page.close()
 
+# -------------------------
+# Nuevo: obtener info de perfil (para PAGE_TYPE == 'following')
+# -------------------------
 async def get_profile_info_playwright(context, username, worker_id):
     """
     Extrae: name, username, bio (description), account_type (categoria), num_followers (si está).
@@ -674,6 +677,18 @@ async def get_profile_info_playwright(context, username, worker_id):
             await page.close()
 
 async def process_batch(context, batch, worker_id, semaphore):
+    """Procesa un lote de usuarios con un worker. Si page == 'following' extrae perfil completo."""
+    async with semaphore:
+        results = []
+        for username in batch:
+            if page == 'following':
+                result = await get_profile_info_playwright(context, username, worker_id)
+            else:
+                result = await get_follower_count_playwright(context, username, worker_id)
+            results.append(result)
+            # Pequeña pausa entre perfiles del mismo worker
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+        return results
     """Procesa un lote de usuarios con un worker"""
     async with semaphore:
         results = []
@@ -953,52 +968,72 @@ def benford_analysis(csv_path, save_fig=True, show_plot=True):
 
 # ====================== GUARDAR RESULTADOS ======================
 def save_results(account_name, results_dict):
-    """Guarda resultados en CSV y TXT, incluyendo el primer dígito del número de seguidores,
-       y después ejecuta el análisis de Benford sobre el CSV generado."""
-    
-    # Convertir resultados a lista con columna adicional
-    results_list = []
-    for username, count in results_dict.items():
-        if count is not None:
-            first_digit = str(count)[0]
-        else:
-            first_digit = "N/A"
-        results_list.append([account_name, username, count, first_digit])
-    
-    # CSV
+    """
+    Guarda resultados detectando formato:
+     - valores int/None -> comportamiento original (Username, Username_Follower, Num_Followers, Primer_Dígito)
+     - valores dict -> nuevo formato con: Account, Username, Name, Bio, Account_Type, Num_Followers, Primer_Dígito
+    """
+    # Detectar si results_dict values son dict o ints
+    sample_val = next(iter(results_dict.values()), None)
+    writing_extended = isinstance(sample_val, dict)
+
+    # Preparar rows
+    if writing_extended:
+        # Preparar lista de filas con campos completos
+        rows = []
+        for username, info in results_dict.items():
+            # info es un dict
+            name = info.get('name') if isinstance(info, dict) else None
+            bio = info.get('bio') if isinstance(info, dict) else None
+            account_type = info.get('account_type') if isinstance(info, dict) else None
+            num_followers = info.get('num_followers') if isinstance(info, dict) else None
+            primer = str(num_followers)[0] if num_followers not in (None, 'None') and str(num_followers).isdigit() else "N/A"
+            rows.append([account_name, username, name or "", bio or "", account_type or "", num_followers if num_followers is not None else "", primer])
+        # CSV header extended
+        header = ['Account', 'Username', 'Name', 'Bio', 'Account_Type', 'Num_Followers', 'Primer_Dígito']
+
+    else:
+        # Formato original: username -> int or None
+        rows = []
+        for username, num_followers in results_dict.items():
+            primer = str(num_followers)[0] if num_followers not in (None, 'None') and str(num_followers).isdigit() else "N/A"
+            rows.append([username, account_name, num_followers if num_followers is not None else "", primer])
+        header = ['Username', 'Username_Follower', 'Num_Followers', 'Primer_Dígito']
+
+    # Escribir CSV
     try:
         with open(logger.csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            # Cabecera con nueva columna
-            writer.writerow(['Username', 'Username_Follower', 'Num_Followers', 'Primer_Dígito'])
-            writer.writerows(results_list)
+            writer.writerow(header)
+            writer.writerows(rows)
         logger.success(f"📊 CSV generado correctamente: {logger.csv_file}")
     except Exception as e:
         logger.error(f"Error al guardar CSV: {str(e)}")
-        return  # Si no escribimos CSV, no tiene sentido continuar con Benford
-    
-    # TXT
+        return
+
+    # Mantener TXT antiguo sin cambios (opcional: podrías añadir info_extended ahí si quieres)
     try:
         with open(logger.txt_file, 'w', encoding='utf-8') as f:
             f.write(f"{'='*80}\n")
             f.write(f"ANÁLISIS DE SEGUIDORES (HÍBRIDO) - {account_name}\n")
             f.write(f"Fecha: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"{'='*80}\n\n")
-            
-            # Encabezado
-            f.write(f"{'Cuenta':<20} | {'Follower':<25} | {'Num Seguidores':>15} | {'1er Dígito':>10}\n")
-            f.write(f"{'-'*20}-+-{'-'*25}-+-{'-'*15}-+-{'-'*10}\n")
-            
-            # Filas
-            for account_name, follower, num_followers, first_digit in results_list:
-                num_str = f"{num_followers:,}" if num_followers is not None else "N/A"
-                f.write(f"{account_name:<20} | {follower:<25} | {num_str:>15} | {first_digit:>10}\n")
-        
+            if writing_extended:
+                f.write("Formato extendido (seguido -> perfil):\n")
+                for account_name_, username, name, bio, account_type, num_followers, primer in rows:
+                    f.write(f"{username: <25} | {name: <20} | {account_type or '':<15} | followers: {num_followers or 'N/A'} | 1er: {primer}\n")
+            else:
+                f.write(f"{'Cuenta':<20} | {'Follower':<25} | {'Num Seguidores':>15} | {'1er Dígito':>10}\n")
+                f.write(f"{'-'*20}-+-{'-'*25}-+-{'-'*15}-+-{'-'*10}\n")
+                for username, account_name_, num_followers, primer in rows:
+                    num_str = f"{num_followers:,}" if num_followers not in (None, '') else "N/A"
+                    f.write(f"{account_name_:<20} | {username:<25} | {num_str:>15} | {primer:>10}\n")
+
         logger.success(f"📄 TXT generado correctamente: {logger.txt_file}")
     except Exception as e:
         logger.error(f"Error al guardar TXT: {str(e)}")
-    
-    # --- Ahora que el CSV está escrito, ejecutar Benford ---
+
+    # --- Ahora que el CSV está escrito, ejecutar Benford (si aplica) ---
     try:
         if os.path.exists(logger.csv_file):
             logger.log("🔎 Ejecutando análisis de Benford sobre el CSV generado...")
